@@ -73,40 +73,40 @@ export class UserController {
         }
       })
 
-      if (!foundUser) {
-        const api = await polkadotApi()
-        const keyring = new Keyring({
-          type: process.env.POLKADOT_CRYPTO_TYPE as KeypairType,
-          ss58Format: Number(process.env.POLKADOT_KEYRING_PREFIX)
-        });
-        const mnemonic = 'chalk cargo recipe ring loud deputy element hole moral soon lock credit';
-        const from = keyring.addFromMnemonic(mnemonic);
-        const to = user.id;
-        const value = 100000000000000; // send 100 myria
-        const {nonce} = await api.query.system.account(from.address)
+      // if (!foundUser) {
+      //   const api = await polkadotApi()
+      //   const keyring = new Keyring({
+      //     type: process.env.POLKADOT_CRYPTO_TYPE as KeypairType,
+      //     ss58Format: Number(process.env.POLKADOT_KEYRING_PREFIX)
+      //   });
+      //   const mnemonic = 'chalk cargo recipe ring loud deputy element hole moral soon lock credit';
+      //   const from = keyring.addFromMnemonic(mnemonic);
+      //   const to = user.id;
+      //   const value = 100000000000000; // send 100 myria
+      //   const {nonce} = await api.query.system.account(from.address)
 
-        let count: number = 0
+      //   let count: number = 0
 
-        const foundQueue = await this.queueRepository.findOne({where: {id: 'admin'}})
-        if (!foundQueue) {
-          count = nonce.toJSON()
+      //   const foundQueue = await this.queueRepository.findOne({where: {id: 'admin'}})
+      //   if (!foundQueue) {
+      //     count = nonce.toJSON()
 
-          const queue = await this.queueRepository.create({
-            id: 'admin',
-            count
-          })
+      //     const queue = await this.queueRepository.create({
+      //       id: 'admin',
+      //       count
+      //     })
 
-          await this.queueRepository.updateById(queue.id, {count: count + 1})
-        } else {
-          count = foundQueue.count
+      //     await this.queueRepository.updateById(queue.id, {count: count + 1})
+      //   } else {
+      //     count = foundQueue.count
 
-          await this.queueRepository.updateById(foundQueue.id, {count: count + 1})
-        }
+      //     await this.queueRepository.updateById(foundQueue.id, {count: count + 1})
+      //   }
 
-        const transfer = api.tx.balances.transfer(to, value);
-        await transfer.signAndSend(from, {nonce: count});
-        await api.disconnect()
-      } else throw new Error('UserExists')
+      //   const transfer = api.tx.balances.transfer(to, value);
+      //   await transfer.signAndSend(from, {nonce: count});
+      //   await api.disconnect()
+      // } else throw new Error('UserExists')
 
       const newUser = await this.userRepository.create({
         ...user,

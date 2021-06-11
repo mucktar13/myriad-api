@@ -94,9 +94,9 @@ export class UserCredentialController {
           profile_image_url: user.profile_image_url ? user.profile_image_url.replace('normal', '400x400') : ''
         }, publicKey)
         
-        const statusTransfer = await this.transferTipsToUser(twitterCredential, user.id)
+        // const statusTransfer = await this.transferTipsToUser(twitterCredential, user.id)
         
-        if(!statusTransfer) throw new HttpErrors.NotFound('RPC Lost Connection')
+        // if(!statusTransfer) throw new HttpErrors.NotFound('RPC Lost Connection')
 
         return true
 
@@ -118,9 +118,9 @@ export class UserCredentialController {
           profile_image_url: redditUser.icon_img ? redditUser.icon_img.split('?')[0] : ''
         }, publicKey)
 
-        const statusTransferReddit = await this.transferTipsToUser(redditCredential, 't2_' + redditUser.id)
+        // const statusTransferReddit = await this.transferTipsToUser(redditCredential, 't2_' + redditUser.id)
 
-        if (!statusTransferReddit) throw new HttpErrors.NotFound('RPC Lost Connection')
+        // if (!statusTransferReddit) throw new HttpErrors.NotFound('RPC Lost Connection')
 
         return true
 
