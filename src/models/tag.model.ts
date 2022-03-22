@@ -2,11 +2,18 @@ import {Entity, model, property} from '@loopback/repository';
 
 @model({
   settings: {
-    strictObjectIDCoercion: true,
     mongodb: {
       collection: 'tags',
     },
-  }
+    indexes: {
+      tagIndex: {
+        keys: {
+          count: 1,
+          updatedAt: 1,
+        },
+      },
+    },
+  },
 })
 export class Tag extends Entity {
   @property({
@@ -22,12 +29,6 @@ export class Tag extends Entity {
   id: string;
 
   @property({
-    type: 'boolean',
-    default: false
-  })
-  hide: boolean;
-
-  @property({
     type: 'number',
     required: false,
     default: 1,
@@ -37,12 +38,14 @@ export class Tag extends Entity {
   @property({
     type: 'date',
     required: false,
+    default: () => new Date(),
   })
-  createdAt: string;
+  createdAt?: string;
 
   @property({
     type: 'date',
     required: false,
+    default: () => new Date(),
   })
   updatedAt: string;
 

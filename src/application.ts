@@ -1,70 +1,78 @@
+import {AuthenticationComponent} from '@loopback/authentication';
 import {BootMixin} from '@loopback/boot';
 import {ApplicationConfig, createBindingFromClass} from '@loopback/core';
-import {CronComponent} from '@loopback/cron';
-import {RepositoryMixin, SchemaMigrationOptions} from '@loopback/repository';
-import {RestApplication} from '@loopback/rest';
+import {HealthComponent} from '@loopback/health';
 import {
-  RestExplorerBindings,
-  RestExplorerComponent
-} from '@loopback/rest-explorer';
+  AnyObject,
+  RepositoryMixin,
+  SchemaMigrationOptions,
+} from '@loopback/repository';
+import {RestApplication, Request, Response} from '@loopback/rest';
+import {RestExplorerComponent} from '@loopback/rest-explorer';
 import {ServiceMixin} from '@loopback/service-proxy';
-import {Keyring} from '@polkadot/api';
-import {mnemonicGenerate, encodeAddress} from '@polkadot/util-crypto';
-import {u8aToHex} from '@polkadot/util'
-import {KeypairType} from '@polkadot/util-crypto/types';
 import * as firebaseAdmin from 'firebase-admin';
+import {config} from './config';
 import path from 'path';
+import {JWTAuthenticationComponent} from './components';
+import {MyriadSequence} from './sequence';
 import {
-  FetchContentRedditJob,
-  FetchContentSocialMediaJob,
-  FetchContentTwitterJob,
-  UpdatePostsJob,
-  RemovedContentJob
-} from './jobs';
+  CurrencyService,
+  ExperienceService,
+  FCMService,
+  FriendService,
+  MetricService,
+  NotificationService,
+  PostService,
+  SocialMediaService,
+  TagService,
+  TransactionService,
+  UserSocialMediaService,
+  ActivityLogService,
+  VoteService,
+} from './services';
+import {UpdateExchangeRateJob, UpdatePeopleProfileJob} from './jobs';
+import {CronComponent} from '@loopback/cron';
+import * as Sentry from '@sentry/node';
+import multer from 'multer';
+import {v4 as uuid} from 'uuid';
+import {FILE_UPLOAD_SERVICE} from './keys';
+import {FCSService} from './services/fcs.service';
 import {
+  AccountSettingRepository,
+  ActivityLogRepository,
   CommentRepository,
-  ConversationRepository,
+  CurrencyRepository,
+  DraftPostRepository,
   ExperienceRepository,
+  ExperienceUserRepository,
   FriendRepository,
-  LikeRepository,
+  LanguageSettingRepository,
+  NotificationRepository,
+  NotificationSettingRepository,
   PeopleRepository,
   PostRepository,
-  PublicMetricRepository,
-  SavedExperienceRepository,
+  ReportRepository,
   TagRepository,
   TransactionRepository,
-  UserCredentialRepository,
+  UserCurrencyRepository,
+  UserExperienceRepository,
+  UserReportRepository,
   UserRepository,
-  TokenRepository,
-  DetailTransactionRepository,
-  UserTokenRepository,
-  QueueRepository
+  UserSocialMediaRepository,
+  VoteRepository,
+  WalletRepository,
 } from './repositories';
-import people from './seed-data/people.json';
-import posts from './seed-data/posts.json';
-import users from './seed-data/users.json';
-import tokens from './seed-data/tokens.json'
-import {polkadotApi} from './helpers/polkadotApi'
-import {MySequence} from './sequence';
-import {NotificationService} from './services';
+import {NetworkType, WalletType} from './enums';
+import {
+  RateLimiterComponent,
+  RateLimitSecurityBindings,
+} from 'loopback4-ratelimiter';
+import {omit} from 'lodash';
+import {DateUtils} from './utils/date-utils';
+import {Experience} from './models';
 
-interface PlatformUser {
-  username: string,
-  platform_account_id?: string
-}
-
-interface Post {
-  tags?: string[],
-  platformUser: PlatformUser,
-  platform?: string,
-  text?: string,
-  textId?: string,
-  hasMedia?: boolean,
-  link?: string,
-  createdAt?: string,
-  peopleId?: string,
-  platformCreatedAt?: string
-}
+const date = new DateUtils();
+const jwt = require('jsonwebtoken');
 
 export {ApplicationConfig};
 
@@ -74,34 +82,21 @@ export class MyriadApiApplication extends BootMixin(
   constructor(options: ApplicationConfig = {}) {
     super(options);
 
-    // Set up the custom sequence
-    this.sequence(MySequence);
-
     // Set up default home page
     this.static('/', path.join(__dirname, '../public'));
-
-    // Customize @loopback/rest-explorer configuration here
-    this.configure(RestExplorerBindings.COMPONENT).to({
-      path: '/explorer',
-    });
-    this.component(RestExplorerComponent);
-
-    // Add cron component
-    this.component(CronComponent);
-    this.add(createBindingFromClass(FetchContentSocialMediaJob))
-    this.add(createBindingFromClass(RemovedContentJob))
-
-
-    // Optional:
-    // this.add(createBindingFromClass(FetchContentTwitterJob))
-    // this.add(createBindingFromClass(FetchContentRedditJob))
-    // this.add(createBindingFromClass(UpdatePostsJob))
-
-    // Add services
-    this.service(NotificationService)
+    // Set up the custom sequence
+    this.sequence(MyriadSequence);
+    this.configureFileUpload();
+    this.configureFirebase();
+    this.configureSentry();
+    // Register component
+    this.registerComponent();
+    // Register services
+    this.registerService();
+    // Register job
+    this.registerJob();
 
     this.projectRoot = __dirname;
-    // Customize @loopback/boot Booter Conventions here
     this.bootOptions = {
       controllers: {
         // Customize ControllerBooter Conventions here
@@ -110,251 +105,552 @@ export class MyriadApiApplication extends BootMixin(
         nested: true,
       },
     };
-
-    // initialize firebase app
-    firebaseAdmin.initializeApp()
   }
 
-  async migrateSchema(options?: SchemaMigrationOptions) {
-    await super.migrateSchema(options)
+  registerComponent() {
+    this.component(HealthComponent);
+    this.component(CronComponent);
+    this.component(AuthenticationComponent);
+    this.component(JWTAuthenticationComponent);
+    this.component(RestExplorerComponent);
 
-    const tagRepo = await this.getRepository(TagRepository)
-    const postsRepo = await this.getRepository(PostRepository)
-    const peopleRepo = await this.getRepository(PeopleRepository)
-    const transactionRepo = await this.getRepository(TransactionRepository)
-    const userRepo = await this.getRepository(UserRepository)
-    const savedExperienceRepo = await this.getRepository(SavedExperienceRepository)
-    const experienceRepo = await this.getRepository(ExperienceRepository)
-    const userCredRepo = await this.getRepository(UserCredentialRepository)
-    const commentRepo = await this.getRepository(CommentRepository)
-    const publicMetricRepo = await this.getRepository(PublicMetricRepository)
-    const likeRepository = await this.getRepository(LikeRepository)
-    const conversationRepository = await this.getRepository(ConversationRepository)
-    const friendRepository = await this.getRepository(FriendRepository)
-    const tokenRepository = await this.getRepository(TokenRepository)
-    const detailTransactionRepository = await this.getRepository(DetailTransactionRepository)
-    const userTokenRepository = await this.getRepository(UserTokenRepository)
-    const queueRepository = await this.getRepository(QueueRepository)
+    if (this.options.test) return;
+    if (config.REDIS_CONNECTOR !== 'kv-redis') return;
+    this.component(RateLimiterComponent);
+    this.bind(RateLimitSecurityBindings.CONFIG).to({
+      name: 'redis',
+      type: 'RedisStore',
+      windowMs: 15 * date.minute,
+      max: (req: Request, res: Response) => {
+        switch (req.method) {
+          case 'GET':
+            return 900;
 
-    await likeRepository.deleteAll()
-    await conversationRepository.deleteAll()
-    await tagRepo.deleteAll()
-    await postsRepo.deleteAll()
-    await peopleRepo.deleteAll()
-    await transactionRepo.deleteAll()
-    await userRepo.deleteAll()
-    await savedExperienceRepo.deleteAll()
-    await experienceRepo.deleteAll()
-    await userCredRepo.deleteAll()
-    await commentRepo.deleteAll()
-    await publicMetricRepo.deleteAll()
-    await friendRepository.deleteAll()
-    await tokenRepository.deleteAll()
-    await userTokenRepository.deleteAll()
-    await detailTransactionRepository.deleteAll()
-    await queueRepository.deleteAll()
+          case 'POST':
+            return 50;
 
-    const keyring = new Keyring({
-      type: process.env.POLKADOT_CRYPTO_TYPE as KeypairType
+          case 'PATCH':
+            return 50;
+
+          case 'DELETE':
+            return 50;
+
+          default:
+            return 900;
+        }
+      },
+      keyGenerator: (req: Request, res: Response) => {
+        const token = req.headers?.authorization?.replace(/bearer /i, '');
+        const decryptedToken = token
+          ? jwt.verify(token, config.JWT_TOKEN_SECRET_KEY)
+          : undefined;
+        const keyId = decryptedToken?.id ?? req.ip;
+        const key = `${req.method}${req.path}/${keyId}`;
+
+        return key;
+      },
+      handler: (req: Request, res: Response) => {
+        res.status(429).send({
+          error: {
+            statusCode: 429,
+            name: 'TooManyRequestsError',
+            message: 'Too many request, please try again later',
+          },
+        });
+      },
+      skipFailedRequests: true,
+    });
+  }
+
+  registerService() {
+    this.service(NotificationService);
+    this.service(FriendService);
+    this.service(UserSocialMediaService);
+    this.service(TransactionService);
+    this.service(SocialMediaService);
+    this.service(CurrencyService);
+    this.service(PostService);
+    this.service(TagService);
+    this.service(ExperienceService);
+    this.service(MetricService);
+    this.service(ActivityLogService);
+    this.service(VoteService);
+
+    // 3rd party service
+    this.service(FCMService);
+    this.service(FCSService);
+  }
+
+  registerJob() {
+    this.add(createBindingFromClass(UpdateExchangeRateJob));
+    this.add(createBindingFromClass(UpdatePeopleProfileJob));
+  }
+
+  configureFileUpload() {
+    if (this.options.test) return;
+    const multerOptions: multer.Options = {
+      storage: multer.diskStorage({
+        filename: (req, file, cb) => {
+          cb(null, `${uuid()}${path.extname(file.originalname)}`);
+        },
+      }),
+    };
+    // Configure the file upload service with multer options
+    this.configure(FILE_UPLOAD_SERVICE).to(multerOptions);
+  }
+
+  configureFirebase() {
+    if (this.options.test || !config.FIREBASE_STORAGE_BUCKET) return;
+    firebaseAdmin.initializeApp({
+      storageBucket: config.FIREBASE_STORAGE_BUCKET,
+    });
+  }
+
+  configureSentry() {
+    if (this.options.test || !config.SENTRY_DSN) return;
+    Sentry.init({
+      dsn: process.env.SENTRY_DSN,
+      tracesSampleRate: 1.0,
+    });
+  }
+
+  async migrateSchema(options?: SchemaMigrationOptions): Promise<void> {
+    await super.migrateSchema(options);
+
+    if (options?.existingSchema === 'alter') {
+      await this.doMigrateExperience();
+      await this.doMigrateComment();
+      await this.doMigrateUser();
+      return;
+    }
+  }
+
+  async doMigrateExperience(): Promise<void> {
+    if (this.options.alter.indexOf('experience') === -1) return;
+    const {experienceRepository} = await this.repositories();
+
+    const collection = experienceRepository.dataSource.connector.collection(
+      Experience.modelName,
+    );
+
+    await collection.updateMany(
+      {},
+      {
+        $rename: {tags: 'allowedTags'},
+        $set: {
+          prohibitedTags: [],
+          clonedCount: 0,
+        },
+      },
+    );
+  }
+
+  async doMigrateComment(): Promise<void> {
+    if (this.options.alter.indexOf('comment') === -1) return;
+    const {commentRepository} = await this.repositories();
+
+    await commentRepository.updateAll(
+      {deleteByUser: false},
+      {deleteByUser: {exists: false}},
+    );
+  }
+
+  async doMigrateUser(): Promise<void> {
+    if (this.options.alter.indexOf('user') === -1) return;
+    const {
+      accountSettingRepository,
+      activityLogRepository,
+      commentRepository,
+      draftPostRepository,
+      experienceUserRepository,
+      experienceRepository,
+      friendRepository,
+      languageSettingRepository,
+      notificationSettingRepository,
+      notificationRepository,
+      postRepository,
+      reportRepository,
+      userCurrencyRepository,
+      userExperienceRepository,
+      userReportRepository,
+      userSocMedRepository,
+      userRepository,
+      voteRepository,
+      walletRepository,
+    } = await this.repositories();
+    const {count} = await userRepository.count({id: /^0x/});
+    const bar = this.initializeProgressBar('Alter user');
+
+    let i = 0;
+    const start = true;
+
+    bar.start(count, 0);
+    while (start) {
+      const oldUser = await userRepository.findOne({
+        where: {
+          id: {
+            regexp: '^0x',
+          },
+        },
+      });
+
+      if (!oldUser) break;
+
+      await userRepository.deleteById(oldUser.id);
+
+      const rawUser = omit(oldUser, ['id']);
+      const newUser = await userRepository.create(rawUser);
+      const oldId = oldUser.id.toString();
+      const newId = newUser.id.toString();
+
+      await Promise.allSettled([
+        this.accountSetting(oldId, newId, accountSettingRepository),
+        this.activityLog(oldId, newId, activityLogRepository),
+        this.commentMention(oldId, newId, commentRepository),
+        this.comment(oldId, newId, commentRepository),
+        this.draftPost(oldId, newId, draftPostRepository),
+        this.experienceUser(oldId, newId, experienceUserRepository),
+        this.experience(oldId, newId, experienceRepository),
+        this.friend(oldId, newId, friendRepository),
+        this.languageSetting(oldId, newId, languageSettingRepository),
+        this.notifSetting(oldId, newId, notificationSettingRepository),
+        this.notification(oldId, newId, notificationRepository),
+        this.postMention(oldId, newId, postRepository),
+        this.post(oldId, newId, postRepository),
+        this.report(oldId, newId, reportRepository),
+        this.userCurrency(oldId, newId, userCurrencyRepository),
+        this.userExperience(oldId, newId, userExperienceRepository),
+        this.userReport(oldId, newId, userReportRepository),
+        this.userSocialMedia(oldId, newId, userSocMedRepository),
+        this.vote(oldId, newId, voteRepository),
+        this.wallet(oldId, newId, walletRepository),
+      ]);
+
+      i++;
+
+      bar.update(i);
+    }
+
+    bar.stop();
+  }
+
+  async accountSetting(
+    oldId: string,
+    newId: string,
+    accountSettingRepository: AccountSettingRepository,
+  ): Promise<void> {
+    await accountSettingRepository.updateAll({userId: newId}, {userId: oldId});
+  }
+
+  async activityLog(
+    oldId: string,
+    newId: string,
+    activityLogRepository: ActivityLogRepository,
+  ) {
+    await activityLogRepository.updateAll({userId: newId}, {userId: oldId});
+    await activityLogRepository.updateAll(
+      {referenceId: newId},
+      {referenceId: oldId},
+    );
+  }
+
+  async commentMention(
+    oldId: string,
+    newId: string,
+    commentRepository: CommentRepository,
+  ) {
+    const comments = await commentRepository.find({
+      where: <AnyObject>{
+        'mentions.id': oldId,
+      },
     });
 
-    const updateUsers = users.map((user:any) => {
-      const seed = mnemonicGenerate()
-      const pair = keyring.createFromUri(seed + '', user)
-
-      return {
-        ...user,
-        id: u8aToHex(pair.publicKey),
-        seed_example: seed,
-        bio: `Hello, my name is ${user.name}`,
-        createdAt: new Date().toString(),
-        updatedAt: new Date().toString()
-      }
-    })
-
-    const newToken = await tokenRepository.createAll(tokens)
-    // const newUser = await userRepo.createAll(updateUsers)
-
-    const api = await polkadotApi(process.env.POLKADOT_MYRIAD_RPC || "") 
-
-    for (let i = 0; i < updateUsers.length; i++) {
-      const mnemonic = 'chalk cargo recipe ring loud deputy element hole moral soon lock credit';
-      const from = keyring.addFromMnemonic(mnemonic);
-      const value = 100000000000000;
-      const {nonce} = await api.query.system.account(encodeAddress(from.address, 214))
-
-      let count: number = nonce.toJSON()
-
-      const transfer = api.tx.balances.transfer(encodeAddress(updateUsers[i].id, 214), value)
-
-      const newUser = await userRepo.create(updateUsers[i])
-      const txHash = await transfer.signAndSend(from, {nonce: count + i});
-
-      await transactionRepo.create({
-        trxHash: txHash.toString(),
-        from: u8aToHex(from.publicKey),
-        to: updateUsers[i].id,
-        value: value,
-        state: 'success',
-        createdAt: new Date().toString(),
-        tokenId: 'MYR'
-      })
-
-      await userTokenRepository.create({
-        userId: newUser.id,
-        tokenId: "MYR"
-      })
-
-      await detailTransactionRepository.create({
-        sentToMe: 100000000000000,
-        sentToThem: 0,
-        userId: newUser.id,
-        tokenId: 'MYR'
-      })
-    }
-
-    await api.disconnect()
-
-    const newPeople = await peopleRepo.createAll(people)
-
-    for (let i = 0; i < newPeople.length; i++) {
-      const person = newPeople[i]
-      const personAccountId = person.platform_account_id
-      const personUsername = person.username
-      const personPlatform = person.platform
-
-      for (let j = 0; j < posts.length; j++) {
-        const post: Post = posts[j]
-        const postAccountId = post.platformUser.platform_account_id
-        const postAccountUsername = post.platformUser.username
-
-        post.createdAt = new Date().toString()
-
-        if (personPlatform === 'twitter') {
-          if (personAccountId === postAccountId) {
-            post.peopleId = person.id
+    await Promise.all(
+      comments.map(async comment => {
+        const mentions = comment.mentions.map(mention => {
+          if (mention.id === oldId) {
+            mention.id = newId;
           }
-        }
+          return mention;
+        });
+        const currentText = `{\"type\":\"mention\",\"children\":[{\"text\":\"\"}],\"value\":\"${oldId}\"`;
+        const updatedText = `{\"type\":\"mention\",\"children\":[{\"text\":\"\"}],\"value\":\"${newId}\"`;
+        return commentRepository.updateById(comment.id, {
+          mentions: mentions,
+          text: comment.text?.replace(
+            new RegExp(currentText, 'g'),
+            updatedText,
+          ),
+        });
+      }),
+    );
+  }
 
-        if (personPlatform === 'reddit') {
-          if (personAccountId === postAccountId) {
-            post.peopleId = person.id
+  async comment(
+    oldId: string,
+    newId: string,
+    commentRepository: CommentRepository,
+  ) {
+    await commentRepository.updateAll({userId: newId}, {userId: oldId});
+  }
+
+  async draftPost(
+    oldId: string,
+    newId: string,
+    draftPostRepository: DraftPostRepository,
+  ) {
+    await draftPostRepository.updateAll({createdBy: newId}, {createdBy: oldId});
+  }
+
+  async experienceUser(
+    oldId: string,
+    newId: string,
+    experienceUserRepository: ExperienceUserRepository,
+  ) {
+    await experienceUserRepository.updateAll({userId: newId}, {userId: oldId});
+  }
+
+  async experience(
+    oldId: string,
+    newId: string,
+    experienceRepository: ExperienceRepository,
+  ) {
+    await experienceRepository.updateAll(
+      {createdBy: newId},
+      {createdBy: oldId},
+    );
+  }
+
+  async friend(
+    oldId: string,
+    newId: string,
+    friendRepository: FriendRepository,
+  ) {
+    await friendRepository.updateAll(
+      {requesteeId: newId},
+      {requesteeId: oldId},
+    );
+    await friendRepository.updateAll(
+      {requestorId: newId},
+      {requestorId: oldId},
+    );
+  }
+
+  async languageSetting(
+    oldId: string,
+    newId: string,
+    languageSettingRepository: LanguageSettingRepository,
+  ) {
+    await languageSettingRepository.updateAll({userId: newId}, {userId: oldId});
+  }
+
+  async notifSetting(
+    oldId: string,
+    newId: string,
+    notificationSettingRepository: NotificationSettingRepository,
+  ) {
+    await notificationSettingRepository.updateAll(
+      {userId: newId},
+      {userId: oldId},
+    );
+  }
+
+  async notification(
+    oldId: string,
+    newId: string,
+    notificationRepository: NotificationRepository,
+  ) {
+    await notificationRepository.updateAll(
+      {referenceId: newId},
+      {referenceId: oldId},
+    );
+    await notificationRepository.updateAll({from: newId}, {from: oldId});
+    await notificationRepository.updateAll({to: newId}, {to: oldId});
+  }
+
+  async postMention(
+    oldId: string,
+    newId: string,
+    postRepository: PostRepository,
+  ) {
+    const posts = await postRepository.find({
+      where: <AnyObject>{
+        'mentions.id': oldId,
+      },
+    });
+
+    await Promise.all(
+      posts.map(async post => {
+        const mentions = post.mentions.map(mention => {
+          if (mention.id === oldId) {
+            mention.id = newId;
           }
-        }
+          return mention;
+        });
+        const currentText = `{\"type\":\"mention\",\"children\":[{\"text\":\"\"}],\"value\":\"${oldId}\"`;
+        const updatedText = `{\"type\":\"mention\",\"children\":[{\"text\":\"\"}],\"value\":\"${newId}\"`;
+        return postRepository.updateById(post.id, {
+          mentions: mentions,
+          text: post.text?.replace(new RegExp(currentText, 'g'), updatedText),
+        });
+      }),
+    );
+  }
 
-        if (personPlatform === 'facebook') {
-          if (personUsername === postAccountUsername) {
-            post.peopleId = person.id
-            post.platformCreatedAt = new Date().toString()
-          }
-        }
-      }
-    }
+  async post(oldId: string, newId: string, postRepository: PostRepository) {
+    await postRepository.updateAll({createdBy: newId}, {createdBy: oldId});
+  }
 
-    for (let i = 0; i < posts.length; i++) {
-      const {tags} = posts[i]
-      const post: any = posts[i]
-      // const post = await postsRepo.create(posts[i])
-      const newKey = keyring.addFromUri('//' + post.peopleId)
+  async report(
+    oldId: string,
+    newId: string,
+    reportRepository: ReportRepository,
+  ) {
+    await reportRepository.updateAll(
+      {referenceId: newId},
+      {referenceId: oldId},
+    );
+  }
 
-      post.walletAddress = u8aToHex(newKey.publicKey);
+  async userCurrency(
+    oldId: string,
+    newId: string,
+    userCurrencyRepository: UserCurrencyRepository,
+  ) {
+    await userCurrencyRepository.updateAll({userId: newId}, {userId: oldId});
+  }
 
-      const newPost = await postsRepo.create(post);
+  async userExperience(
+    oldId: string,
+    newId: string,
+    userExperienceRepository: UserExperienceRepository,
+  ) {
+    await userExperienceRepository.updateAll({userId: newId}, {userId: oldId});
+  }
 
-      await publicMetricRepo.create({
-        liked: 0,
-        comment: 0,
-        disliked: 0,
-        postId: newPost.id
-      })
+  async userReport(
+    oldId: string,
+    newId: string,
+    userReportRepository: UserReportRepository,
+  ) {
+    await userReportRepository.updateAll(
+      {reportedBy: newId},
+      {reportedBy: oldId},
+    );
+  }
 
-      for (let j = 0; j < tags.length; j++) {
-        const foundTag = await tagRepo.findOne({
-          where: {
-            or: [
-              {
-                id: tags[j]
-              },
-              {
-                id: tags[j].toLowerCase()
-              },
-              {
-                id: tags[j].toUpperCase()
-              }
-            ],
-          }
-        })
+  async userSocialMedia(
+    oldId: string,
+    newId: string,
+    userSocialMediaRepository: UserSocialMediaRepository,
+  ) {
+    await userSocialMediaRepository.updateAll({userId: newId}, {userId: oldId});
+  }
 
-        if (!foundTag) {
-          await tagRepo.create({
-            id: tags[j],
-            count: 1,
-            createdAt: new Date().toString(),
-            updatedAt: new Date().toString()
-          })
-        } else {
-          const oneDay:number = 60 * 60 * 24 * 1000;
-          const isOneDay:boolean = new Date().getTime() - new Date(foundTag.updatedAt).getTime() > oneDay;
+  async vote(oldId: string, newId: string, voteRepository: VoteRepository) {
+    await voteRepository.updateAll({userId: newId}, {userId: oldId});
+  }
 
-          await tagRepo.updateById(foundTag.id, {
-            updatedAt: new Date().toString(),
-            count: isOneDay ? 1 : foundTag.count + 1
-          })
-        }
-      }
-    }
+  async wallet(
+    oldId: string,
+    newId: string,
+    walletRepository: WalletRepository,
+  ) {
+    await walletRepository.create({
+      id: oldId,
+      networks: [NetworkType.POLKADOT],
+      network: NetworkType.POLKADOT,
+      type: WalletType.POLKADOT,
+      primary: true,
+      userId: newId,
+    });
+  }
 
-    // Unccomment till this
+  async repositories(): Promise<AnyObject> {
+    const accountSettingRepository = await this.getRepository(
+      AccountSettingRepository,
+    );
+    const activityLogRepository = await this.getRepository(
+      ActivityLogRepository,
+    );
+    const commentRepository = await this.getRepository(CommentRepository);
+    const currencyRepository = await this.getRepository(CurrencyRepository);
+    const draftPostRepository = await this.getRepository(DraftPostRepository);
+    const experienceUserRepository = await this.getRepository(
+      ExperienceUserRepository,
+    );
+    const experienceRepository = await this.getRepository(ExperienceRepository);
+    const friendRepository = await this.getRepository(FriendRepository);
+    const languageSettingRepository = await this.getRepository(
+      LanguageSettingRepository,
+    );
+    const notificationRepository = await this.getRepository(
+      NotificationRepository,
+    );
+    const notificationSettingRepository = await this.getRepository(
+      NotificationSettingRepository,
+    );
+    const peopleRepository = await this.getRepository(PeopleRepository);
+    const postRepository = await this.getRepository(PostRepository);
+    const reportRepository = await this.getRepository(ReportRepository);
+    const tagRepository = await this.getRepository(TagRepository);
+    const transactionRepository = await this.getRepository(
+      TransactionRepository,
+    );
+    const userRepository = await this.getRepository(UserRepository);
+    const userCurrencyRepository = await this.getRepository(
+      UserCurrencyRepository,
+    );
+    const userExperienceRepository = await this.getRepository(
+      UserExperienceRepository,
+    );
+    const userReportRepository = await this.getRepository(UserReportRepository);
+    const userSocMedRepository = await this.getRepository(
+      UserSocialMediaRepository,
+    );
+    const voteRepository = await this.getRepository(VoteRepository);
+    const walletRepository = await this.getRepository(WalletRepository);
 
-    // users.forEach(async user => {
-    //   const seed = mnemonicGenerate()
-    //   const pair = keyring.createFromUri(seed + '', user)
+    return {
+      accountSettingRepository,
+      activityLogRepository,
+      commentRepository,
+      currencyRepository,
+      draftPostRepository,
+      experienceUserRepository,
+      experienceRepository,
+      friendRepository,
+      languageSettingRepository,
+      notificationRepository,
+      notificationSettingRepository,
+      peopleRepository,
+      postRepository,
+      reportRepository,
+      tagRepository,
+      transactionRepository,
+      userRepository,
+      userCurrencyRepository,
+      userExperienceRepository,
+      userReportRepository,
+      userSocMedRepository,
+      voteRepository,
+      walletRepository,
+    };
+  }
 
-    //   await userRepo.create({
-    //     ...user,
-    //     id: pair.address,
-    //     bio: `Hello, my name is ${user.name}`,
-    //     createdAt: new Date().toString(),
-    //     updatedAt: new Date().toString()
-    //   })
-  
-      // await userRepo.savedExperiences(newUser.id).create({
-      //   name: newUser.name + " Experience",
-      //   tags: [
-      //     {
-      //       id: 'cryptocurrency',
-      //       hide: false
-      //     },
-      //     {
-      //       id: 'blockchain',
-      //       hide: false
-      //     },
-      //     {
-      //       id: 'technology',
-      //       hide: false
-      //     }
-      //   ],
-      //   people: [
-      //     {
-      //       username: "gavofyork",
-      //       platform_account_id: "33962758",
-      //       platform: "twitter",
-      //       profile_image_url: "https://pbs.twimg.com/profile_images/981390758870683656/RxA_8cyN_400x400.jpg",
-      //       hide: false
-      //     },
-      //     {
-      //       username: "CryptoChief",
-      //       platform_account_id: "t2_e0t5q",
-      //       platform: "reddit",
-      //       profile_image_url: "https://www.redditstatic.com/avatars/avatar_default_15_DB0064.png",
-      //       hide: false
-      //     }
-      //   ],
-      //   description: `Hello, ${newUser.name}! Welcome to myriad!`,
-      //   userId: newUser.id,
-      //   createdAt: new Date().toString(),
-      //   updatedAt: new Date().toString()
-      // })
-    // })
+  initializeProgressBar(title: string) {
+    const cliProgress = require('cli-progress');
+    const colors = require('ansi-colors');
+
+    return new cliProgress.Bar({
+      format:
+        `${title} |` +
+        colors.cyan('{bar}') +
+        '| {percentage}% || ETA: {eta}s || {value}/{total} documents ',
+      barCompleteChar: '\u2588',
+      barIncompleteChar: '\u2591',
+      hideCursor: true,
+      synchronousUpdate: true,
+    });
   }
 }
